@@ -354,3 +354,111 @@ The project is complete for v1 only when the commands above **work against the c
 - DLL unloading while an active hook depends on the DLL.
 
 Keep the code modular so future functionality can be added without rewriting the REPL.
+
+---
+
+## 14. Implemented v1
+
+This repository contains a self-contained Windows x64 implementation. It uses only
+the C11 runtime and Win32; no package manager or external runtime library is
+required. The controller supports Windows 10/11 x64 and intentionally rejects
+32-bit targets, self-attachment, protected/inaccessible processes, ambiguous
+process names, and unsupported hook prologues.
+
+### Build with MinGW-w64 GCC (recommended)
+
+From a 64-bit MinGW shell or PowerShell with MinGW on `PATH`:
+
+```powershell
+mingw32-make -j4
+mingw32-make test
+```
+
+Outputs are written to `build/`. The Makefile uses C11 and warning-clean GCC
+flags. A clean rebuild is:
+
+```powershell
+mingw32-make clean
+mingw32-make -j4
+```
+
+### Build with CMake
+
+```powershell
+cmake -S . -B build-cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cmake --parallel
+ctest --test-dir build-cmake --output-on-failure
+```
+
+MSVC x64 is also supported by the main application. The sample target has a
+GCC-specific deterministic NOP prologue when built by MinGW; on MSVC its normal
+compiler prologue is used and may be conservatively rejected by the v1 decoder.
+
+### Controlled demonstration
+
+Start `build\oculus_sample_target.exe`, note its PID, then run
+`build\oculus.exe` and enter:
+
+```text
+open <pid>
+list dlls
+list functions:USER32.dll
+load "C:\absolute\path\to\build\oculus_sample_replacement.dll"
+hook OculusSampleAdd:oculus_sample_target.exe OculusReplacementAdd:oculus_sample_replacement.dll
+hooks
+unhook 1
+close
+quit
+```
+
+The target prints `result=42` before the hook, `result=1042` while it is active,
+and `result=42` after removal. `tests/test_integration.c` automates that complete
+transition against a child process created by the test itself.
+
+For a direct MinGW build without Make or CMake, the repository root also contains:
+
+```text
+build_oculus.bat       builds build\oculus.exe
+build_example_dll.bat  builds build\oculus_example_injected.dll
+```
+
+The source and usage notes for the additional injectable DLL are in
+`dll_examples/`. It can be loaded on its own or used against the sample target;
+its replacement changes the sample result from `42` to `2042`.
+
+### Hook design and limitations
+
+- The x64 patch is a 14-byte absolute indirect jump (`FF 25 00 00 00 00`
+  followed by the 64-bit destination), so it is independent of `rel32` range.
+- The internal instruction-length decoder accepts a deliberately bounded subset
+  of Intel x86-64 encodings. Instructions are decoded to whole boundaries.
+  Relative branches/calls, RIP-relative operands, VEX/EVEX instructions, and
+  unknown encodings in the copied prologue are rejected. This makes relocation
+  the identity operation; accepted instructions are copied exactly into the
+  trampoline, followed by another absolute jump to the remainder of the target.
+- Existing target threads are enumerated repeatedly until the thread list is
+  stable, suspended, and checked to ensure no instruction pointer is inside the
+  patch or trampoline range. Patching is refused if a thread cannot be inspected
+  or a stable snapshot cannot be obtained. This strategy is intended for the
+  controlled sample and quiescent debugging targets, not highly concurrent or
+  adversarial processes that continually create threads.
+- Remote code pages use an RW-to-RX transition. The target prologue protection is
+  restored after each write and the instruction cache is flushed. Rollback
+  restores saved bytes when installation fails.
+- Duplicate/overlapping hooks and externally modified hook bytes are refused.
+  Forwarded exports are followed before patching; a forwarder string is never
+  treated as executable code.
+- The optional replacement-DLL export `DWORD WINAPI OculusSetOriginal(void *)`
+  receives the trampoline address after installation. The sample replacement
+  uses this to call the original without recursing through the patched entry.
+  Production replacement functions must exactly match the original Windows x64
+  ABI, parameters, and return type.
+- `close` removes session hooks before releasing the process handle and refuses
+  to detach if safe restoration fails. If Oculus is forcibly killed or crashes,
+  it cannot perform this cleanup; the controlled target should then be restarted.
+  Oculus never unloads replacement DLLs and has no process-termination command.
+
+Only use DLL loading and hooking on processes you own or are explicitly
+authorized to debug. DLL initialization and replacement functions execute code
+inside the target process and can crash or corrupt it if their ABI or behavior is
+incorrect.

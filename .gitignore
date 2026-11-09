@@ -1,6 +1,10 @@
 # Prerequisites
 *.d
 
+# Local build trees
+build/
+build-*/
+
 # Object files
 *.o
 *.ko
