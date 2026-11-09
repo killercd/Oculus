@@ -2,14 +2,15 @@
 
 /*
  * Conservative x86-64 length decoder for hook prologues.  It intentionally
- * rejects VEX/EVEX and unknown encodings.  The hook layer also rejects every
- * RIP-relative or relative-control-flow instruction, so copied instructions
- * never need semantic rewriting.  This small decoder is derived from the
+ * rejects VEX/EVEX and unknown encodings. It reports the exact displacement
+ * locations required by the hook layer to relocate supported RIP-relative and
+ * relative-control-flow instructions. This small decoder is derived from the
  * encoding rules in Intel SDM vol. 2, not from a runtime dependency.
  */
 bool oculus_x64_decode(const uint8_t *p, size_t n, OculusX64Instruction *out) {
     size_t i = 0; bool rex_w = false, op16 = false, addr32 = false;
     if (!p || !out || !n) return false;
+    ZeroMemory(out, sizeof(*out));
     for (;;) {
         if (i >= n || i >= 15) return false;
         uint8_t b = p[i];
@@ -65,22 +66,35 @@ bool oculus_x64_decode(const uint8_t *p, size_t n, OculusX64Instruction *out) {
         default: return false;
         }
     }
-    bool rip = false;
+    bool rip = false; size_t displacement_offset = 0;
     if (modrm) {
         if (i >= n) return false;
         uint8_t mr = p[i++], mod = mr >> 6, rm = mr & 7;
-        if (!addr32 && mod == 0 && rm == 5) rip = true;
         if (mod != 3 && rm == 4) {
             if (i >= n) return false;
             uint8_t sib = p[i++];
             if (mod == 0 && (sib & 7) == 5) i += 4;
         }
         if (mod == 1) i += 1;
-        else if (mod == 2 || (mod == 0 && rm == 5)) i += 4;
+        else if (mod == 2) i += 4;
+        else if (mod == 0 && rm == 5) {
+            if (!addr32) { rip = true; displacement_offset = i; }
+            i += 4;
+        }
         if ((op == 0xF6 && ((mr >> 3) & 7) <= 1)) imm = 1;
         if ((op == 0xF7 && ((mr >> 3) & 7) <= 1)) imm = op16 ? 2 : 4;
     }
     if (i > 15 || imm > 15 - i || i + imm > n) return false;
-    out->length = (uint8_t)(i + imm); out->rip_relative = rip; out->relative_branch = relative;
+    out->length = (uint8_t)(i + imm);
+    out->rip_relative = rip;
+    out->relative_branch = relative;
+    if (rip) {
+        out->displacement_offset = (uint8_t)displacement_offset;
+        out->displacement_size = 4;
+    }
+    if (relative) {
+        out->relative_offset = (uint8_t)i;
+        out->relative_size = (uint8_t)imm;
+    }
     return true;
 }

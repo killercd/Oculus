@@ -8,6 +8,11 @@ static bool path_basename_equal(const wchar_t *path, const wchar_t *name) {
     return _wcsicmp(base ? base + 1 : path, name) == 0;
 }
 
+static bool is_path_qualified(const wchar_t *name) {
+    return wcschr(name, L'\\') != NULL || wcschr(name, L'/') != NULL ||
+           (name[0] && name[1] == L':');
+}
+
 static bool module_from_entry(const MODULEENTRY32W *me, OculusModule *out) {
     out->base = (uintptr_t)me->modBaseAddr;
     out->size = (size_t)me->modBaseSize;
@@ -22,12 +27,23 @@ bool oculus_find_module(OculusSession *s, const wchar_t *name, OculusModule *out
         oculus_set_error(s, GetLastError(), L"Cannot enumerate modules for PID %lu", (unsigned long)s->pid);
         return false;
     }
+    wchar_t full_query[32768];
+    bool path_query = is_path_qualified(name);
+    if (path_query && !GetFullPathNameW(name, 32768, full_query, NULL)) {
+        DWORD error = GetLastError(); CloseHandle(snap);
+        oculus_set_error(s, error, L"Cannot normalize module path '%ls'", name);
+        return false;
+    }
     MODULEENTRY32W me = {0}; me.dwSize = sizeof(me);
     size_t matches = 0; OculusModule candidate;
     if (Module32FirstW(snap, &me)) {
         do {
-            if (_wcsicmp(me.szModule, name) == 0 || path_basename_equal(me.szExePath, name) ||
-                _wcsicmp(me.szExePath, name) == 0) {
+            bool entry_matches = path_query
+                ? _wcsicmp(me.szExePath, full_query) == 0
+                : (_wcsicmp(me.szModule, name) == 0 ||
+                   path_basename_equal(me.szExePath, name) ||
+                   _wcsicmp(me.szExePath, name) == 0);
+            if (entry_matches) {
                 module_from_entry(&me, &candidate); ++matches;
             }
         } while (Module32NextW(snap, &me));

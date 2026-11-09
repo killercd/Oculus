@@ -63,6 +63,7 @@ static void help(void) {
          "  help\n"
          "  open <decimal-pid|process.exe>\n"
          "  close\n"
+         "  list process\n"
          "  list dlls\n"
          "  list functions:<module.dll>\n"
          "  list functions <module.dll>\n"
@@ -113,6 +114,9 @@ bool oculus_repl_execute(OculusSession *s, char *line) {
         char *end = NULL; unsigned long long id = strtoull(av[1], &end, 10);
         if (!end || *end || !id) { oculus_set_internal_error(s, L"unhook requires a positive numeric ID"); success = false; }
         else if ((success = oculus_require_session(s, L"unhook"))) success = oculus_remove_hook(s, (uint64_t)id);
+    } else if (equals(av[0], "list") && ac == 2 &&
+               (equals(av[1], "process") || equals(av[1], "processes"))) {
+        success = oculus_list_processes(s);
     } else if (equals(av[0], "list") && ac == 2 && equals(av[1], "dlls")) success = oculus_list_modules(s);
     else if (equals(av[0], "list") && ac == 2 && _strnicmp(av[1], "functions:", 10) == 0 && av[1][10]) {
         wchar_t *module = NULL; if (wide_arg(s, av[1] + 10, &module)) { success = oculus_list_exports(s, module); free(module); } else success = false;

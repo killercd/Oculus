@@ -158,6 +158,38 @@ bool oculus_open_name(OculusSession *s, const wchar_t *name) {
     return oculus_open_pid(s, matches[0]);
 }
 
+bool oculus_list_processes(OculusSession *s) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        oculus_set_error(s, GetLastError(), L"Cannot enumerate processes");
+        return false;
+    }
+    PROCESSENTRY32W pe;
+    ZeroMemory(&pe, sizeof(pe));
+    pe.dwSize = sizeof(pe);
+    if (!Process32FirstW(snap, &pe)) {
+        DWORD error = GetLastError();
+        CloseHandle(snap);
+        oculus_set_error(s, error, L"Process32FirstW failed");
+        return false;
+    }
+    wprintf(L"     PID     PPID  THREADS  EXECUTABLE\n");
+    size_t count = 0;
+    do {
+        wchar_t marker = s->process && pe.th32ProcessID == s->pid ? L'*' : L' ';
+        wprintf(L"%lc %7lu  %7lu  %7lu  %ls\n", marker,
+                (unsigned long)pe.th32ProcessID,
+                (unsigned long)pe.th32ParentProcessID,
+                (unsigned long)pe.cntThreads,
+                pe.szExeFile);
+        ++count;
+    } while (Process32NextW(snap, &pe));
+    CloseHandle(snap);
+    wprintf(L"\n%zu process%ls listed. '*' marks the attached process.\n",
+            count, count == 1 ? L"" : L"es");
+    return true;
+}
+
 bool oculus_close(OculusSession *s) {
     if (!s->process) {
         oculus_set_internal_error(s, L"No process is attached");

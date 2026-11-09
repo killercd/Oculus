@@ -43,6 +43,10 @@ typedef struct OculusX64Instruction {
     uint8_t length;
     bool rip_relative;
     bool relative_branch;
+    uint8_t displacement_offset;
+    uint8_t displacement_size;
+    uint8_t relative_offset;
+    uint8_t relative_size;
 } OculusX64Instruction;
 bool oculus_x64_decode(const uint8_t *code, size_t available, OculusX64Instruction *out);
 

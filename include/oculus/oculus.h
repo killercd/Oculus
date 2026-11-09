@@ -50,6 +50,7 @@ void oculus_session_init(OculusSession *session, bool verbose);
 bool oculus_open_pid(OculusSession *session, uint32_t pid);
 bool oculus_open_name(OculusSession *session, const wchar_t *name);
 bool oculus_close(OculusSession *session);
+bool oculus_list_processes(OculusSession *session);
 bool oculus_list_modules(OculusSession *session);
 bool oculus_list_exports(OculusSession *session, const wchar_t *module_name);
 bool oculus_load_library(OculusSession *session, const wchar_t *path);

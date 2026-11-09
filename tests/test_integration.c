@@ -28,8 +28,6 @@ int main(int argc, char **argv) {
     wchar_t target_full[32768], dll_full[32768];
     if (!GetFullPathNameW(target, 32768, target_full, NULL) ||
         !GetFullPathNameW(dll, 32768, dll_full, NULL)) return 2;
-    const wchar_t *replacement_module = wcsrchr(dll_full, L'\\');
-    replacement_module = replacement_module ? replacement_module + 1 : dll_full;
 
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE}; HANDLE read_pipe = NULL, write_pipe = NULL;
     if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) return 2;
@@ -48,7 +46,7 @@ int main(int argc, char **argv) {
     if (!oculus_open_pid(&session, pi.dwProcessId)) goto cleanup;
     if (!oculus_load_library(&session, dll_full)) goto cleanup;
     if (!oculus_install_hook(&session, "OculusSampleAdd", L"oculus_sample_target.exe",
-                             "OculusReplacementAdd", replacement_module, &id)) goto cleanup;
+                             "OculusReplacementAdd", dll, &id)) goto cleanup;
     { char before[4096]; drain_pipe(read_pipe, before, sizeof(before)); }
     Sleep(1300);
     char hooked[4096]; drain_pipe(read_pipe, hooked, sizeof(hooked));

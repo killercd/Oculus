@@ -84,6 +84,7 @@ oculus> exit
 | `open <pid>` | Attach to a process by decimal PID. |
 | `open <process.exe>` | Find and attach to a process by executable name. |
 | `close` | Detach, free resources, and close handles without terminating the target. |
+| `list process` | List running processes with PID, parent PID, thread count, and executable name. |
 | `list dlls` | List loaded DLLs/modules of the selected process. |
 | `list functions:<module.dll>` | List exports of the selected loaded module. |
 | `load <path-to-dll>` | Load a DLL into the selected process. Paths with spaces must be quoted. |
@@ -401,6 +402,7 @@ Start `build\oculus_sample_target.exe`, note its PID, then run
 
 ```text
 open <pid>
+list process
 list dlls
 list functions:USER32.dll
 load "C:\absolute\path\to\build\oculus_sample_replacement.dll"
@@ -431,11 +433,15 @@ its replacement changes the sample result from `42` to `2042`.
 - The x64 patch is a 14-byte absolute indirect jump (`FF 25 00 00 00 00`
   followed by the 64-bit destination), so it is independent of `rel32` range.
 - The internal instruction-length decoder accepts a deliberately bounded subset
-  of Intel x86-64 encodings. Instructions are decoded to whole boundaries.
-  Relative branches/calls, RIP-relative operands, VEX/EVEX instructions, and
-  unknown encodings in the copied prologue are rejected. This makes relocation
-  the identity operation; accepted instructions are copied exactly into the
-  trampoline, followed by another absolute jump to the remainder of the target.
+  of Intel x86-64 encodings. Instructions are decoded to whole boundaries and
+  expose displacement metadata. The trampoline is allocated within ±2 GB of the
+  target; RIP-relative 32-bit displacements and supported 8/32-bit relative
+  branches/calls are recalculated for the new address. Branches into the copied
+  prologue are redirected to the corresponding trampoline instruction. A short
+  branch that no longer fits, VEX/EVEX instruction, unknown encoding, or any
+  relocation that cannot be represented safely is rejected before patching.
+  The relocated prologue is followed by an absolute jump to the remainder of
+  the target function.
 - Existing target threads are enumerated repeatedly until the thread list is
   stable, suspended, and checked to ensure no instruction pointer is inside the
   patch or trampoline range. Patching is refused if a thread cannot be inspected

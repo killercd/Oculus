@@ -1,6 +1,7 @@
 #include "internal.h"
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #define ABS_JUMP_SIZE 14u
 
@@ -22,6 +23,101 @@ static void make_abs_jump(unsigned char out[ABS_JUMP_SIZE], uintptr_t destinatio
     memset(out + 2, 0, 4);
     uint64_t address = (uint64_t)destination;
     memcpy(out + 6, &address, sizeof(address));
+}
+
+static LPVOID allocate_near_target(OculusSession *s, uintptr_t target, size_t size) {
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    uintptr_t granularity = (uintptr_t)info.dwAllocationGranularity;
+    uintptr_t base = target & ~(granularity - 1u);
+    uintptr_t minimum = (uintptr_t)info.lpMinimumApplicationAddress;
+    uintptr_t maximum = (uintptr_t)info.lpMaximumApplicationAddress;
+    const uintptr_t range = UINT64_C(0x70000000);
+
+    for (uintptr_t distance = granularity; distance <= range; distance += granularity) {
+        if (base >= distance && base - distance >= minimum) {
+            LPVOID memory = VirtualAllocEx(s->process, (LPVOID)(base - distance), size,
+                                           MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (memory) return memory;
+        }
+        if (base <= UINTPTR_MAX - distance) {
+            uintptr_t candidate = base + distance;
+            if (candidate <= maximum && size <= maximum - candidate) {
+                LPVOID memory = VirtualAllocEx(s->process, (LPVOID)candidate, size,
+                                               MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                if (memory) return memory;
+            }
+        }
+    }
+    oculus_set_internal_error(s, L"Cannot allocate a trampoline within relocation range of 0x%llX",
+                              (unsigned long long)target);
+    return NULL;
+}
+
+static bool relocate_prologue(OculusSession *s, uintptr_t target, uintptr_t trampoline,
+                              const unsigned char *original, size_t length,
+                              unsigned char *relocated) {
+    memcpy(relocated, original, length);
+    size_t offset = 0;
+    while (offset < length) {
+        OculusX64Instruction ins;
+        if (!oculus_x64_decode(original + offset, length - offset, &ins) ||
+            !ins.length || offset + ins.length > length) {
+            oculus_set_internal_error(s, L"Cannot re-decode prologue at offset %zu", offset);
+            return false;
+        }
+        if (ins.rip_relative) {
+            int32_t old_displacement;
+            memcpy(&old_displacement, original + offset + ins.displacement_offset,
+                   sizeof(old_displacement));
+            int64_t referenced = (int64_t)(target + offset + ins.length) + old_displacement;
+            int64_t new_displacement = referenced -
+                (int64_t)(trampoline + offset + ins.length);
+            if (new_displacement < INT32_MIN || new_displacement > INT32_MAX) {
+                oculus_set_internal_error(s, L"RIP-relative instruction at offset %zu is out of trampoline range",
+                                          offset);
+                return false;
+            }
+            int32_t adjusted = (int32_t)new_displacement;
+            memcpy(relocated + offset + ins.displacement_offset, &adjusted, sizeof(adjusted));
+        }
+        if (ins.relative_branch) {
+            int64_t old_displacement;
+            if (ins.relative_size == 1) {
+                int8_t value;
+                memcpy(&value, original + offset + ins.relative_offset, sizeof(value));
+                old_displacement = value;
+            } else if (ins.relative_size == 4) {
+                int32_t value;
+                memcpy(&value, original + offset + ins.relative_offset, sizeof(value));
+                old_displacement = value;
+            } else {
+                oculus_set_internal_error(s, L"Unsupported relative operand at offset %zu", offset);
+                return false;
+            }
+            int64_t destination = (int64_t)(target + offset + ins.length) + old_displacement;
+            if (destination >= (int64_t)target && destination < (int64_t)(target + length))
+                destination = (int64_t)trampoline + (destination - (int64_t)target);
+            int64_t adjusted = destination - (int64_t)(trampoline + offset + ins.length);
+            if (ins.relative_size == 1) {
+                if (adjusted < INT8_MIN || adjusted > INT8_MAX) {
+                    oculus_set_internal_error(s, L"Short relative branch at offset %zu cannot be relocated", offset);
+                    return false;
+                }
+                int8_t value = (int8_t)adjusted;
+                memcpy(relocated + offset + ins.relative_offset, &value, sizeof(value));
+            } else {
+                if (adjusted < INT32_MIN || adjusted > INT32_MAX) {
+                    oculus_set_internal_error(s, L"Relative branch at offset %zu is out of trampoline range", offset);
+                    return false;
+                }
+                int32_t value = (int32_t)adjusted;
+                memcpy(relocated + offset + ins.relative_offset, &value, sizeof(value));
+            }
+        }
+        offset += ins.length;
+    }
+    return true;
 }
 
 static bool has_id(const SuspendedThreads *set, DWORD id) {
@@ -116,6 +212,9 @@ static bool configure_sample_original(OculusSession *s, const wchar_t *replaceme
                                       uintptr_t trampoline) {
     OculusResolvedExport setter;
     if (!oculus_resolve_export(s, replacement_module, "OculusSetOriginal", &setter)) {
+        if (s->verbose)
+            wprintf(L"[debug] %ls has no optional OculusSetOriginal export\n",
+                    replacement_module);
         s->last_error[0] = L'\0'; s->last_win32_error = 0; return true; /* Optional convention. */
     }
     HANDLE thread = CreateRemoteThread(s->process, NULL, 0,
@@ -123,6 +222,9 @@ static bool configure_sample_original(OculusSession *s, const wchar_t *replaceme
     if (!thread) { oculus_set_error(s, GetLastError(), L"Cannot call optional OculusSetOriginal"); return false; }
     DWORD wait = WaitForSingleObject(thread, 5000); CloseHandle(thread);
     if (wait != WAIT_OBJECT_0) { oculus_set_internal_error(s, L"Optional OculusSetOriginal did not complete"); return false; }
+    if (s->verbose)
+        wprintf(L"[debug] Configured OculusSetOriginal with trampoline 0x%llX\n",
+                (unsigned long long)trampoline);
     return true;
 }
 
@@ -159,9 +261,6 @@ bool oculus_install_hook(OculusSession *s, const char *target_export,
         if (!oculus_x64_decode(probe + patch_length, sizeof(probe) - patch_length, &ins)) {
             oculus_set_internal_error(s, L"Unsupported x64 instruction at prologue offset %zu", patch_length); return false;
         }
-        if (ins.rip_relative || ins.relative_branch) {
-            oculus_set_internal_error(s, L"Prologue requires instruction relocation at offset %zu; conservative v1 hook refused", patch_length); return false;
-        }
         patch_length += ins.length;
         if (patch_length > OCULUS_MAX_PATCH) { oculus_set_internal_error(s, L"Decoded prologue is too large"); return false; }
     }
@@ -173,11 +272,15 @@ bool oculus_install_hook(OculusSession *s, const char *target_export,
         oculus_set_internal_error(s, L"Target prologue changed while preparing hook"); resume_threads(&threads); return false;
     }
     size_t trampoline_size = patch_length + ABS_JUMP_SIZE;
-    LPVOID trampoline = VirtualAllocEx(s->process, NULL, trampoline_size,
-                                       MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!trampoline) { oculus_set_error(s, GetLastError(), L"Cannot allocate trampoline"); resume_threads(&threads); return false; }
+    LPVOID trampoline = allocate_near_target(s, target.address, trampoline_size);
+    if (!trampoline) { resume_threads(&threads); return false; }
     unsigned char trampoline_bytes[OCULUS_MAX_PATCH + ABS_JUMP_SIZE];
-    memcpy(trampoline_bytes, probe, patch_length);
+    if (!relocate_prologue(s, target.address, (uintptr_t)trampoline, probe,
+                           patch_length, trampoline_bytes)) {
+        VirtualFreeEx(s->process, trampoline, 0, MEM_RELEASE);
+        resume_threads(&threads);
+        return false;
+    }
     make_abs_jump(trampoline_bytes + patch_length, target.address + patch_length);
     bool patched = false, ok = false; DWORD trampoline_old = 0, patch_old = 0;
     if (!WriteProcessMemory(s->process, trampoline, trampoline_bytes, trampoline_size, &got) || got != trampoline_size) {
